@@ -190,19 +190,21 @@ function rewriteCookie(cookieStr, target) {
 // Routes
 // ---------------------------------------------------------------------------
 
-app.get('/', (_req, res) => {
-    res.sendFile(path.join(__dirname, 'shell.html'));
-});
-
-// Avoid the browser's automatic favicon request being misread as a proxy
-// target (e.g. bare-domain fallback treating "favicon.ico" as a hostname).
-app.get('/favicon.ico', (_req, res) => res.status(204).end());
-
 // ---------------------------------------------------------------------------
 // Simple mode: a toggle back to the original single-target behavior (fixed
 // destination, redirects followed server-side, no path/cookie rewriting).
 // There's exactly one shared target at a time - fine for local single-user
 // use, but note it's not per-tab/session.
+//
+// Critically, this must be mounted at the true root with NO path prefix.
+// Sites with client-side routing (React Router etc.) match their own routes
+// against window.location.pathname - a prefix like "/__simple/login" doesn't
+// match a route registered for "/login", so the app's own router renders
+// its "not found" fallback even though every request behind the scenes
+// succeeded. The original single-target proxy never had this problem
+// because it was mounted at "/" with zero rewriting, so this needs to
+// behave identically once engaged: the browser's own address bar must show
+// the exact same path the target site would show, with nothing extra.
 // ---------------------------------------------------------------------------
 
 let simpleModeTarget = null;
@@ -232,22 +234,6 @@ app.get('/__mode', async (req, res) => {
     return res.status(400).send('mode must be "simple" or "smart"');
 });
 
-// The proxied page's own bootstrap/API calls (fetch('/edge-api/bootstrap'),
-// i18n files, etc.) are bare absolute paths with no "/__simple" prefix and no
-// scheme - simple mode never taught the browser about that prefix (we don't
-// rewrite HTML), so left alone they'd fall through to smart mode's routing,
-// which has no target to recover from (simple mode sets no tracking cookie)
-// and ends up treating the first path segment as a hostname. While simple
-// mode is engaged, route every such ambiguous request into /__simple too -
-// this is what makes it "one fixed target catches everything", same as the
-// original single-target proxy.
-app.use((req, res, next) => {
-    if (!simpleModeTarget) return next();
-    if (req.url.startsWith('/__simple') || req.url.startsWith('/__mode')) return next();
-    if (parseExplicitTarget(req.url)) return next();
-    return res.redirect(307, '/__simple' + req.url);
-});
-
 const simpleModeProxy = createProxyMiddleware({
     router: () => simpleModeTarget,
     changeOrigin: true,
@@ -260,10 +246,6 @@ const simpleModeProxy = createProxyMiddleware({
     // handle every upgrade would crash. We call .upgrade() ourselves below
     // (see server.on('upgrade', ...)), which only works when it hasn't
     // auto-subscribed.
-    // http-proxy-middleware forwards req.originalUrl (mount prefix and
-    // all) unless told otherwise, so the "/__simple" mount prefix has to
-    // be stripped explicitly here.
-    pathRewrite: { '^/__simple': '' },
     onProxyRes: (proxyRes) => {
         if (proxyRes.headers['location']) {
             console.log('Redirect detected:', proxyRes.headers['location']);
@@ -275,16 +257,22 @@ const simpleModeProxy = createProxyMiddleware({
     },
 });
 
-app.use(
-    '/__simple',
-    (_req, res, next) => {
-        if (!simpleModeTarget) {
-            return res.status(400).send('Simple mode target not set. Use /__mode?mode=simple&target=...');
-        }
-        next();
-    },
-    simpleModeProxy,
-);
+// While simple mode is engaged, it owns every path at the root - exactly
+// like the original proxy, which had nothing else registered at all.
+app.use((req, res, next) => {
+    if (!simpleModeTarget) return next();
+    if (req.url === '/__mode' || req.url.startsWith('/__mode?')) return next();
+    return simpleModeProxy(req, res, next);
+});
+
+app.get('/', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'shell.html'));
+});
+
+// Avoid the browser's automatic favicon request being misread as a proxy
+// target (e.g. bare-domain fallback treating "favicon.ico" as a hostname).
+// Only reachable in smart mode - simple mode claims every path above.
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
 app.use((req, res, next) => {
     // 1) Explicit scheme in the path is unambiguous - always wins.
@@ -371,16 +359,10 @@ const server = app.listen(3000, () => {
 // guard) above never runs for them. Re-derive the target here using the
 // same rules, re-check it, before handing off to the owning proxy instance.
 server.on('upgrade', async (req, socket, head) => {
-    // simpleModeTarget was already vetted when it was set via /__mode.
-    if (req.url.startsWith('/__simple')) {
-        if (!simpleModeTarget) return socket.destroy();
-        return simpleModeProxy.upgrade(req, socket, head);
-    }
-    if (simpleModeTarget && !req.url.startsWith('/__mode') && !parseExplicitTarget(req.url)) {
-        // Same "everything ambiguous belongs to the one fixed target" rule as
-        // the regular-request middleware, minus the redirect (a 307 isn't
-        // meaningful mid-handshake) - proxy straight to /__simple's target.
-        req.url = '/__simple' + req.url;
+    // simpleModeTarget was already vetted when it was set via /__mode. It
+    // owns every path (mirroring the regular-request middleware above), so
+    // check it first.
+    if (simpleModeTarget && req.url !== '/__mode' && !req.url.startsWith('/__mode?')) {
         return simpleModeProxy.upgrade(req, socket, head);
     }
 

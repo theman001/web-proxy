@@ -130,13 +130,12 @@
 
             if (simpleModeCheckbox.checked) {
                 // Simple mode means "behave exactly like the original,
-                // iframe-less proxy" - some sites (claude.ai included) detect
-                // that they're being framed (Sec-Fetch-Dest: iframe, or their
-                // own window.top !== window.self check) and refuse to render
-                // normally. Navigating the iframe can't fix that; the only
-                // way to truly match the original behavior is to leave the
-                // shell entirely and move the whole tab to the passthrough
-                // path, the same way the original single-target proxy worked.
+                // iframe-less proxy": no shell, no path prefix. Sites with
+                // client-side routing (React Router etc.) match their own
+                // routes against location.pathname - a prefix would make
+                // every route look unmatched even though the server responds
+                // correctly, so the target's own path has to appear at the
+                // browser's true root with nothing added.
                 const parsed = new URL(target);
                 let res;
                 try {
@@ -149,7 +148,7 @@
                     alert(await res.text());
                     return;
                 }
-                window.top.location.href = '/__simple' + parsed.pathname + parsed.search + parsed.hash;
+                window.top.location.href = parsed.pathname + parsed.search + parsed.hash;
                 return;
             }
 
