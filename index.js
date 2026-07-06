@@ -232,6 +232,22 @@ app.get('/__mode', async (req, res) => {
     return res.status(400).send('mode must be "simple" or "smart"');
 });
 
+// The proxied page's own bootstrap/API calls (fetch('/edge-api/bootstrap'),
+// i18n files, etc.) are bare absolute paths with no "/__simple" prefix and no
+// scheme - simple mode never taught the browser about that prefix (we don't
+// rewrite HTML), so left alone they'd fall through to smart mode's routing,
+// which has no target to recover from (simple mode sets no tracking cookie)
+// and ends up treating the first path segment as a hostname. While simple
+// mode is engaged, route every such ambiguous request into /__simple too -
+// this is what makes it "one fixed target catches everything", same as the
+// original single-target proxy.
+app.use((req, res, next) => {
+    if (!simpleModeTarget) return next();
+    if (req.url.startsWith('/__simple') || req.url.startsWith('/__mode')) return next();
+    if (parseExplicitTarget(req.url)) return next();
+    return res.redirect(307, '/__simple' + req.url);
+});
+
 app.use(
     '/__simple',
     (_req, res, next) => {
